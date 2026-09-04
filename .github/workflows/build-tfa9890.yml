@@ -20,7 +20,7 @@ jobs:
       - name: Install toolchain (AOSP arm 4.9, aliased to the prefix build.sh expects)
         run: |
           mkdir -p $HOME/tc
-          curl -sL "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/master.tar.gz" | tar -xz -C $HOME/tc
+          curl -sL "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/android-7.1.2_r1.tar.gz" | tar -xz -C $HOME/tc
           cd $HOME/tc/bin
           for f in arm-linux-androideabi-*; do ln -sf "$f" "arm-linux-gnueabihf-${f#arm-linux-androideabi-}"; done
           $HOME/tc/bin/arm-linux-gnueabihf-gcc --version | head -1
