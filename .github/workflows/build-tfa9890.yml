@@ -1,0 +1,103 @@
+name: Build kernel with TFA9890 right-channel firmware fix
+
+on:
+  push:
+    branches: [ tfa9890-rightfix-rombase ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc zip cpio
+
+      - name: Install toolchain (AOSP arm 4.9, aliased to the prefix build.sh expects)
+        run: |
+          mkdir -p $HOME/tc
+          curl -sL "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/android-7.1.2_r1.tar.gz" | tar -xz -C $HOME/tc
+          cd $HOME/tc/bin
+          for f in arm-linux-androideabi-*; do ln -sf "$f" "arm-linux-gnueabihf-${f#arm-linux-androideabi-}"; done
+          $HOME/tc/bin/arm-linux-gnueabihf-gcc --version | head -1
+
+      - name: Build kernel
+        run: |
+          export PATH="$HOME/tc/bin:$PATH"
+          export ARCH=arm
+          export CI=true
+          export KERNEL_ZIP="SmokeR24.1-TFA9890-rightfix.zip"
+          bash build.sh
+
+      - name: Verify TFA9890 firmware data in vmlinux
+        run: |
+          python3 - <<'PYEOF'
+          import sys
+          expected = {
+            'tfa9890_right.speaker':      bytes.fromhex("ffff4cfffe6affffd2fffe7cfffe04fffe73fffd36fffe73fffdeafffdfcfffee8fffd99ffffaafffe22ffff0ffffe3afffeeffffe8affff08fffd71fffeb1ffff33fffe8bfffc52fffe32fffe15fffd89fffde0fffebdffff0efffd94ffff43fffc97ffff2bfffe85fffe27fffce2fffec8fffccffffe54fffc44fffc51fffd4dfffd8dfffc5bfffe6bfffd43fffeeffffe25fffd9ffffdf5fffc57fffb67fffde8fffe13fffdaafffcaefffca0fffd1dfffbb3fffc65fffde9fffdd8fffb23fffe28fff9a9fffffcfffa51fffde7fffa92fffe13fff8ce000024fff834fffea1fffb1fffff28fff8d1fffce5fff9f6fffdbefff9d9fffc64ffff49fff7befffc59fffabbfffc19fffa62fffc48fffad6fffe51fff5ec0000a0fff7a400016efff1330004fcffef7b000c12fff061001357fff2a3000bffffdc83fffd56ffcc37ffeebdffe936002782004541006c580058150000bfffc843077a5dfffaec0000000000000000000000000000000000000000000000000000000000000000000000004ccccd66666620000020000020000019999a000364000365040000004000190000006c22"),
+            'tfa9890_right_music.preset': bytes.fromhex("0000010000c80000020000000000c800000000012c0147ae002bb000147b0147ae010000fb0000000000080000100000028000010000000ccd00400000000000014801000000014800014808000007c28f0007ae000014"),
+            'tfa9890_left.speaker':       bytes.fromhex("ffff0afffefb000040fffdb1ffffa7fffe81ffffaffffd9afffcc2fffde5fffc90fffeeefffeabffff23fffe81fffe09fffeceffff84ffff02fffea6fffe8afffeddfffe7dfffe10fffeeefffdb8ffff14fffe1dffff7dfffd8dffff29fffe04fffdcafffe6efffcdbffff2dfffd82fffe96fffeadffff85fffd21ffff04fffd5dfffdeefffd36fffb05fffd05fffe4cfffc46fffcc800007bfffc6500005ffff9a6ffff5cfffc66ffff7dfffce3fffee2fffb72fffd4bfffa7bfffbc3fffca0fffbabfffd58fffd30fffcbafffef2fffad2fffc30fffb67fffcaffffbef0000aafff956fffdf9fff846fffc86fffd69000206fff9b8fffcbffff787fffcc3000140fff86cffffe1fff6e6fffe51fff876fffeb2fffe56fffa2efff9ecfffa84fffe92fff92cfffb3dfffa28fffb6500066affff05000f7cffe62ffffad0ffbfa9000038ffc25800479400104d00ad56001a34008070fedfc207b9f900865b0000000000000000000000000000000000000000000000000000000000000000000000004ccccd63d70a2000002000002000001851ec000364000363040000004000190000006c22"),
+            'tfa9890_left_music.preset':  bytes.fromhex("0000010000c80000020000000000c800000000012c0147ae002bb000147b00a3d7010000fb0000000000080000080000028000010000000ccd00400000000000014801000000014800014808000007c28f0007ae000014"),
+          }
+          vm = open('vmlinux', 'rb').read()
+          ok = True
+          for name, data in expected.items():
+              present = data in vm
+              print('  %-8s %s' % ('OK' if present else 'MISSING', name))
+              ok = ok and present
+          names = [b'tfa9890_right.speaker', b'tfa9890_right_music.preset',
+                   b'tfa9890_left.speaker', b'tfa9890_left_music.preset']
+          for name in names:
+              cnt = vm.count(name + bytes([0]))
+              print('  builtin_fw name %s: count=%d' % (name.decode(), cnt))
+              ok = ok and cnt >= 1
+          print('VERIFY:', 'PASS' if ok else 'FAIL')
+          sys.exit(0 if ok else 1)
+          PYEOF
+
+      - name: Verify built DTB matches the ROM device tree
+        run: |
+          python3 - <<'DTBEOF'
+          import struct, hashlib, sys
+          EXPECTED = '653dc5d5542d2dba2db5a88e4aa58fb3b3b5b6287dc1b8d7ca6a073656783c49'
+          dt = bytearray(open('anykernel/kernel/dtb', 'rb').read())
+          NUL = bytes([0])
+          def find_prop(d, name):
+              STR = struct.unpack_from('>I', d, 12)[0]
+              S = struct.unpack_from('>I', d, 8)[0]
+              s = d.find(name.encode() + NUL, STR)
+              if s < 0: return None
+              no = s - STR; p = S
+              while True:
+                  tok, = struct.unpack_from('>I', d, p)
+                  if tok == 1:
+                      e = d.find(NUL, p + 4); p = (e + 4) & ~3
+                  elif tok == 2: p += 4
+                  elif tok == 3:
+                      ln, no2 = struct.unpack_from('>II', d, p + 4)
+                      if no2 == no: return (p + 12, ln)
+                      p = (p + 12 + ln + 3) & ~3
+                  elif tok == 4: p += 4
+                  elif tok == 9: return None
+                  else: return None
+          for name in ['nvidia,dtbbuildtime', 'nvidia,dtsfilename']:
+              r = find_prop(dt, name)
+              if r:
+                  off, ln = r
+                  dt[off:off+ln] = NUL * ln
+          h = hashlib.sha256(bytes(dt)).hexdigest()
+          print('built DTB normalized sha256:', h)
+          print('expected                  :', EXPECTED)
+          print('DTB MATCH:', 'PASS' if h == EXPECTED else 'FAIL')
+          sys.exit(0 if h == EXPECTED else 1)
+          DTBEOF
+      - name: Upload kernel zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmokeR24.1-TFA9890-rightfix
+          path: output/*.zip
+          if-no-files-found: error
